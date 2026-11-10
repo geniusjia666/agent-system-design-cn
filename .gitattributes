@@ -1,0 +1,2 @@
+# Keep the published skill bytes stable. Do not renormalize line endings.
+skills/agent-system-design-cn/** -text
