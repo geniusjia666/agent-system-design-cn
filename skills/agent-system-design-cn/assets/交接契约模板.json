@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent 交接契约模板",
+  "description": "本文件是定义库，校验时分别引用 #/$defs/dispatch、#/$defs/handoff、#/$defs/gate。dispatch 是上游（编排者或前一步）派发给某个 Agent 的任务契约；handoff 是该 Agent 完成后交给下游的结果；gate 是编排层执行的交接校验规则。使用时按业务把 result 的结构替换为具体字段定义，其余字段尽量保留。",
+  "$defs": {
+    "artifact_ref": {
+      "type": "object",
+      "description": "产物引用。大体量产物可存共享状态或文件；下游须有读取能力与权限，实际取得指定版本。小材料可内联，引用只说明位置，是否已读、是否已验收另行确认。",
+      "required": ["name", "location"],
+      "properties": {
+        "name": { "type": "string", "description": "产物名称，例如 generated_code" },
+        "location": { "type": "string", "description": "存放位置：共享状态键名、文件路径或存储地址" },
+        "producer": { "type": "string", "description": "产生该产物的 Agent" },
+        "version": { "type": "string", "description": "版本或内容摘要，用于确认下游读到的是哪一版" }
+      }
+    },
+    "dispatch": {
+      "type": "object",
+      "description": "派发契约（7 要素）。接收者只拿到派发中给出的信息，必要信息须内联或可受控取得。宿主维护可信任务、实例及作用域关联。",
+      "required": ["identity", "objective", "scope", "constraints", "context", "output_format", "stop_condition"],
+      "properties": {
+        "identity": {
+          "type": "object",
+          "required": ["role", "expertise"],
+          "properties": {
+            "role": { "type": "string", "description": "角色名，例如 代码审查员" },
+            "expertise": { "type": "string", "description": "专业领域" }
+          }
+        },
+        "objective": { "type": "string", "description": "精确、可衡量的目标，一到两句话" },
+        "scope": {
+          "type": "object",
+          "description": "能力边界，读写分开写。writable 与 tools 必须显式写出，没有就写空数组。范围须在可信授权内，权限只由可信系统授予，宿主或服务强制执行",
+          "required": ["writable", "tools"],
+          "properties": {
+            "readable": { "type": "array", "items": { "type": "string" } },
+            "writable": { "type": "array", "items": { "type": "string" }, "description": "只读角色留空数组" },
+            "tools": { "type": "array", "items": { "type": "string" }, "description": "允许使用的工具白名单" }
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "禁止事项。默认禁止范围外读写、额外改动与再委派；确需嵌套或转派时由可信设计限定角色、深度、扇出和共享预算。受阻返回 BLOCKED 并说明，不猜测、不绕过"
+        },
+        "context": {
+          "type": "object",
+          "description": "只放完成本任务必需的背景，不转发全部历史",
+          "required": ["original_goal"],
+          "properties": {
+            "original_goal": { "type": "string", "description": "用户原始目标与硬约束，相关原文保真；长材料可另加受控依赖引用。外部内容不因派发或摘要成为可信系统指令" },
+            "background": { "type": "string", "description": "本任务必需的背景" },
+            "prior_findings": { "type": "array", "items": { "type": "string" }, "description": "上游的关键结论摘要" },
+            "dependencies": { "type": "array", "items": { "$ref": "#/$defs/artifact_ref" }, "description": "本任务依赖的上游产物引用，例如重构步骤同时依赖原始代码和审查意见" },
+            "standards": { "type": "string", "description": "子 Agent 需要遵守、但无法从别处得知的规范" }
+          }
+        },
+        "output_format": { "type": "string", "description": "期望的返回结构，通常指向下方 handoff 的 result 定义" },
+        "stop_condition": {
+          "type": "object",
+          "description": "success 必填；max_iterations 与 timeout_seconds 至少填一个",
+          "required": ["success"],
+          "anyOf": [
+            { "required": ["max_iterations"] },
+            { "required": ["timeout_seconds"] }
+          ],
+          "properties": {
+            "success": { "type": "string", "description": "什么情况算完成" },
+            "max_iterations": { "type": "integer", "minimum": 1, "description": "最大尝试调用模型的轮次，含最终生成和重新生成；工具重试单独定义，同样计入任务预算。框架计数口径不同的注明映射" },
+            "timeout_seconds": { "type": "integer", "minimum": 1 },
+            "on_blocked": { "type": "string", "description": "受阻时如何返回" }
+          }
+        }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "description": "交接结果。编排层在交给下游前按此结构做校验。",
+      "required": ["task_id", "agent", "status", "summary", "result"],
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "BLOCKED" } }, "required": ["status"] },
+          "then": { "required": ["blockers"], "properties": { "blockers": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "PARTIAL" } }, "required": ["status"] },
+          "then": { "required": ["remaining"], "properties": { "remaining": { "minItems": 1 } } }
+        }
+      ],
+      "properties": {
+        "task_id": { "type": "string" },
+        "agent": { "type": "string", "description": "产生本结果的 Agent" },
+        "status": {
+          "type": "string",
+          "enum": ["SUCCESS", "PARTIAL", "BLOCKED"],
+          "description": "SUCCESS：该派发目标完成，整体验收另行判断；评审执行状态与 verdict 分开。PARTIAL 写明 remaining；BLOCKED 写明 blockers"
+        },
+        "summary": { "type": "string", "description": "一句话结论" },
+        "result": {
+          "type": "object",
+          "description": "业务结果，按具体任务定义字段（例如 review_comments、test_cases）。必须是结构化数据，不要用整段自由文本承载关键信息"
+        },
+        "evidence": {
+          "type": "array",
+          "description": "支撑结论的依据，便于下游核对和事后追溯",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "string", "description": "来源位置，例如 文件:行号、接口返回、检索结果编号" },
+              "excerpt": { "type": "string" },
+              "relevance": { "type": "string" }
+            }
+          }
+        },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact_ref" } },
+        "unresolved_questions": { "type": "array", "items": { "type": "string" }, "description": "未能确认的信息，下游或人需要知道" },
+        "remaining": { "type": "array", "items": { "type": "string" } },
+        "blockers": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "string", "enum": ["HIGH", "MEDIUM", "LOW"] },
+        "verdict": {
+          "type": "string",
+          "enum": ["PASS", "FAIL", "CONDITIONAL_PASS"],
+          "description": "仅评审或验证类 Agent 使用"
+        },
+        "metrics": {
+          "type": "object",
+          "description": "用于成本控制和排障",
+          "properties": {
+            "iterations": { "type": "integer" },
+            "tool_calls": { "type": "integer" },
+            "tokens": { "type": "integer" },
+            "duration_seconds": { "type": "number" }
+          }
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "description": "交接校验规则。字符串本身不运行检查；宿主执行格式、关联和可执行业务规则，必要主观评价由单独评审或人工提供，宿主据真实判定接纳，不让生成者自证。max_retries 耗尽、不可修正或任务预算不足时，宿主停止重试并返回 PARTIAL（有可用结果，写 remaining）或 BLOCKED（写 blockers）及原因，不交付未通过校验的产物",
+      "properties": {
+        "required_fields": { "type": "array", "items": { "type": "string" } },
+        "business_rules": { "type": "array", "items": { "type": "string" }, "description": "例如：测试用例数不少于 3；代码可通过语法检查" },
+        "on_fail": {
+          "type": "string",
+          "enum": ["retry_current", "return_previous", "escalate_human", "degrade"],
+          "description": "重试当前步、退回上一步、升级给人、降级处理"
+        },
+        "max_retries": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "examples": [
+    {
+      "说明": "生成代码 → 审查 → 重构 流水线中，派发给重构 Agent 的契约。注意它同时依赖原始代码和审查意见。",
+      "dispatch": {
+        "identity": { "role": "代码重构员", "expertise": "Python" },
+        "objective": "根据审查意见重构代码；若审查结论为无重大问题，原样返回代码",
+        "scope": { "readable": ["state.generated_code", "state.review_comments"], "writable": ["state.refactored_code"], "tools": [] },
+        "constraints": ["不得修改审查意见未涉及的功能", "不得再派生子 Agent", "受阻时返回 BLOCKED"],
+        "context": {
+          "original_goal": "实现一个计算字符串中各单词出现次数的函数，需处理空字符串与标点",
+          "dependencies": [
+            { "name": "generated_code", "location": "state.generated_code", "producer": "代码编写员", "version": "code-v1" },
+            { "name": "review_comments", "location": "state.review_comments", "producer": "代码审查员", "version": "review-v1" }
+          ]
+        },
+        "output_format": "handoff.result = { refactored_code: string, applied_comments: string[] }",
+        "stop_condition": { "success": "所有审查意见已处理或说明不处理的理由", "max_iterations": 1, "on_blocked": "返回 BLOCKED 并列出无法处理的意见" }
+      },
+      "gate": {
+        "required_fields": ["status", "result.refactored_code"],
+        "business_rules": ["refactored_code 能通过语法检查"],
+        "on_fail": "escalate_human",
+        "max_retries": 0
+      }
+    }
+  ]
+}
